@@ -26,17 +26,30 @@ class Blockchain:
     def get_latest_block(self):
         return self.chain[-1]
 
-    def add_block(self, new_block):
-        new_block.previous_hash = self.get_latest_block().hash
-        new_block.hash = new_block.calculate_hash()
-        self.chain.append(new_block)
+    def add_block(self, block):
+        if self.is_valid_new_block(block, self.get_latest_block()):
+            self.chain.append(block)
+            return True
+        return False
 
-    def is_chain_valid(self):
-        for i in range(1, len(self.chain)):
-            current = self.chain[i]
-            previous = self.chain[i-1]
-            if current.hash != current.calculate_hash():
-                return False
-            if current.previous_hash != previous.hash:
-                return False
+    def is_valid_new_block(self, block, previous_block):
+        if block.index != previous_block.index + 1:
+            return False
+        if block.previous_hash != previous_block.hash:
+            return False
+        if block.calculate_hash() != block.hash:
+            return False
+        if not block.hash.startswith('0' * self.difficulty):
+            return False
         return True
+
+    def mine_block(self, data):
+        last_block = self.get_latest_block()
+        index = last_block.index + 1
+        nonce = 0
+        timestamp = time.time()
+        while True:
+            new_block = Block(index, last_block.hash, timestamp, data, nonce)
+            if new_block.hash.startswith('0' * self.difficulty):
+                return new_block
+            nonce += 1
