@@ -2,17 +2,16 @@ import socket
 import threading
 import json
 import sys
-import time
 from datetime import datetime
 
-# --- Blockchain & Block classes ---
+# --------- Blockchain classes ----------
 
 class Block:
     def __init__(self, index, previous_hash, timestamp, data, nonce=0, hash=None):
         self.index = index
         self.previous_hash = previous_hash
         self.timestamp = timestamp
-        self.data = data  # data is a dict with supply chain info
+        self.data = data
         self.nonce = nonce
         self.hash = hash or self.calculate_hash()
 
@@ -60,13 +59,10 @@ class Blockchain:
 
     def is_valid_new_block(self, new_block, previous_block):
         if previous_block.index + 1 != new_block.index:
-            print("Invalid index")
             return False
         if previous_block.hash != new_block.previous_hash:
-            print("Invalid previous hash")
             return False
         if new_block.calculate_hash() != new_block.hash:
-            print("Invalid hash")
             return False
         return True
 
@@ -78,8 +74,7 @@ class Blockchain:
 
         new_block = Block(index, previous_block.hash, timestamp, data, nonce)
 
-        # Simple Proof of Work (adjust difficulty here)
-        difficulty = 4
+        difficulty = 3
         target = "0" * difficulty
 
         while not new_block.hash.startswith(target):
@@ -89,170 +84,126 @@ class Blockchain:
         return new_block
 
     def get_product_history(self, product_id):
-        # Return all blocks related to the product_id
         return [blk for blk in self.chain if blk.data.get("product_id") == product_id]
 
-# --- P2P Networking Code ---
+# --------- Node & Networking ---------
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
-PEERS = []  # Connected peer sockets
+PEERS = []
 blockchain = Blockchain()
 
+lock = threading.Lock()  # for thread-safe blockchain access
 
 def handle_client(conn, addr):
-    print(f"Connection from {addr}")
-    while True:
-        try:
-            data = conn.recv(4096)
-            if not data:
-                break
-            msg = json.loads(data.decode())
-            if msg["type"] == "NEW_BLOCK":
-                block_data = msg["data"]
-                block = Block.from_dict(block_data)
-                if blockchain.add_block(block):
-                    print(f"✅ Block added from {addr}: {block.data}")
-                    broadcast_block(block, exclude_conn=conn)
-                else:
-                    print(f"❌ Rejected block from {addr}")
-            elif msg["type"] == "REQUEST_CHAIN":
-                # Send whole blockchain to peer
-                chain_data = [blk.to_dict() for blk in blockchain.chain]
-                response = json.dumps({"type": "CHAIN_RESPONSE", "data": chain_data}).encode()
-                conn.sendall(response)
-            elif msg["type"] == "CHAIN_RESPONSE":
-                # Peer sent us their chain, check if longer and valid
-                their_chain = [Block.from_dict(d) for d in msg["data"]]
-                if len(their_chain) > len(blockchain.chain) and is_valid_chain(their_chain):
-                    blockchain.chain = their_chain
-                    print(f"🔄 Chain updated from {addr}")
-        except Exception as e:
-            print(f"Error handling client {addr}: {e}")
-            break
-    conn.close()
-    if conn in PEERS:
-        PEERS.remove(conn)
-    print(f"Connection closed for {addr}")
-
+    with conn:
+        data = conn.recv(4096)
+        if not data:
+            return
+        command_line = data.decode().strip()
+        response = process_command(command_line)
+        conn.sendall(response.encode())
 
 def start_server():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(('', PORT))
     s.listen(5)
-    print(f"🔊 Listening on port {PORT}")
+    print(f"Server listening on port {PORT} ...")
     while True:
         conn, addr = s.accept()
-        PEERS.append(conn)
         threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
+def process_command(cmd_line):
+    parts = cmd_line.split()
+    if not parts:
+        return "Invalid command"
 
-def connect_to_peer(ip, port):
+    cmd = parts[0].lower()
+
+    if cmd == "connect":
+        if len(parts) != 3:
+            return "Usage: connect <ip> <port>"
+        ip = parts[1]
+        try:
+            port = int(parts[2])
+        except:
+            return "Invalid port number"
+        return connect_peer(ip, port)
+
+    elif cmd == "mine":
+        if len(parts) < 4:
+            return "Usage: mine <product_id> <status> <location>"
+        product_id = parts[1]
+        status = parts[2]
+        location = " ".join(parts[3:])
+        data = {
+            "product_id": product_id,
+            "status": status,
+            "location": location,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        return mine_and_broadcast(data)
+
+    elif cmd == "history":
+        if len(parts) != 2:
+            return "Usage: history <product_id>"
+        product_id = parts[1]
+        return get_history_str(product_id)
+
+    elif cmd == "chain":
+        return get_chain_summary()
+
+    elif cmd == "peers":
+        return f"Connected peers: {len(PEERS)}"
+
+    else:
+        return "Unknown command"
+
+def connect_peer(ip, port):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((ip, port))
         PEERS.append(s)
-        print(f"🔗 Connected to peer {ip}:{port}")
-        # Request chain sync on connection
-        request_chain(s)
-        threading.Thread(target=handle_client, args=(s, (ip, port)), daemon=True).start()
+        return f"Connected to peer {ip}:{port}"
     except Exception as e:
-        print(f"❌ Could not connect to {ip}:{port} — {e}")
-
-
-def broadcast_block(block, exclude_conn=None):
-    msg = {
-        "type": "NEW_BLOCK",
-        "data": block.to_dict()
-    }
-    encoded = json.dumps(msg).encode()
-    for peer in PEERS:
-        if peer != exclude_conn:
-            try:
-                peer.send(encoded)
-            except:
-                pass
-
-
-def request_chain(conn):
-    msg = {
-        "type": "REQUEST_CHAIN",
-        "data": None
-    }
-    conn.send(json.dumps(msg).encode())
-
-
-def is_valid_chain(chain):
-    if chain[0].hash != blockchain.chain[0].hash:
-        print("Genesis block mismatch")
-        return False
-    for i in range(1, len(chain)):
-        if not blockchain.is_valid_new_block(chain[i], chain[i-1]):
-            return False
-    return True
-
+        return f"Failed to connect to {ip}:{port} - {e}"
 
 def mine_and_broadcast(data):
-    print("⛏️ Mining new block...")
-    new_block = blockchain.mine_block(data)
-    blockchain.add_block(new_block)
+    with lock:
+        new_block = blockchain.mine_block(data)
+        blockchain.add_block(new_block)
     broadcast_block(new_block)
-    print("✅ Mined and broadcasted block:", new_block.to_dict())
+    return f"Block mined: index={new_block.index}, product={data['product_id']}"
 
-
-def print_product_history(product_id):
-    history = blockchain.get_product_history(product_id)
+def get_history_str(product_id):
+    with lock:
+        history = blockchain.get_product_history(product_id)
     if not history:
-        print(f"No records found for product ID: {product_id}")
-        return
-    print(f"History for product {product_id}:")
+        return f"No history found for product ID: {product_id}"
+    lines = []
     for blk in history:
-        print(f"  [{blk.index}] {blk.timestamp} - {blk.data['status']} at {blk.data['location']} (hash: {blk.hash[:8]}...)")
+        d = blk.data
+        lines.append(f"[{blk.index}] {d['timestamp']} - {d['status']} at {d['location']} (hash: {blk.hash[:8]}...)")
+    return "\n".join(lines)
 
-# --- Command Line Interface ---
+def get_chain_summary():
+    with lock:
+        chain = blockchain.chain.copy()
+    lines = []
+    for blk in chain:
+        d = blk.data
+        lines.append(f"[{blk.index}] {d['product_id']} - {d['status']} at {d['location']}")
+    return "\n".join(lines)
 
-def start_node():
-    threading.Thread(target=start_server, daemon=True).start()
-    time.sleep(1)
-    print(f"Node running on port {PORT}. Commands:")
-    print("  connect <ip> <port>        # connect to a peer")
-    print("  mine <product_id> <status> <location>   # add supply chain event")
-    print("  history <product_id>       # show product history")
-    print("  chain                      # show blockchain summary")
-    print("  peers                      # show connected peers")
-    print("  exit                       # quit node")
-
-    while True:
-        cmd = input("> ").strip()
-        if cmd.startswith("connect"):
-            _, ip, port = cmd.split()
-            connect_to_peer(ip, int(port))
-        elif cmd.startswith("mine"):
-            parts = cmd.split(maxsplit=4)
-            if len(parts) < 5:
-                print("Usage: mine <product_id> <status> <location>")
-                continue
-            _, product_id, status, location = parts[:4]
-            data = {
-                "product_id": product_id,
-                "status": status,
-                "location": location,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            mine_and_broadcast(data)
-        elif cmd.startswith("history"):
-            _, product_id = cmd.split()
-            print_product_history(product_id)
-        elif cmd == "chain":
-            for blk in blockchain.chain:
-                print(f"[{blk.index}] {blk.timestamp} - {blk.data['product_id']}: {blk.data['status']} at {blk.data['location']}")
-        elif cmd == "peers":
-            print(f"Connected peers: {len(PEERS)}")
-        elif cmd == "exit":
-            print("Exiting node...")
-            break
-        else:
-            print("Unknown command")
-
+def broadcast_block(block):
+    msg = json.dumps({"type": "NEW_BLOCK", "data": block.to_dict()}).encode()
+    dead_peers = []
+    for peer in PEERS:
+        try:
+            peer.sendall(msg)
+        except:
+            dead_peers.append(peer)
+    for dp in dead_peers:
+        PEERS.remove(dp)
 
 if __name__ == "__main__":
-    start_node()
+    start_server()
